@@ -1,0 +1,411 @@
+---
+title: Introduction to quantitative time diary analysis
+subtitle: Day 1 exercices
+author: Pierre Walthéry
+organisation:   UK Data Service and Centre for Time Use Research 
+date: "2 November 2023"
+mainfont: Arial
+sansfont: Arial
+
+format:
+#  pdf:
+#    toc: false
+#    number-sections: false
+#    colorlinks: true
+#    papersize: A4
+#    geometry:
+#       - top=30mm
+#        - left=20mm
+#        - heightrounded
+  html:
+    toc: true
+    toc-location: left
+    toc-title: Content
+    embed-resources: true
+
+pdf-engine: lualatex
+execute:
+  echo: true
+  warning: false
+---
+
+
+## 1. Setting things up
+
+ R studio  has many functionalities, but for the purpose of this workshop, we will keep it simple and use it merely as a two-windows text editor. 
+
+We first need to load the R libraries we are going to need:
+
+    - dplyr for data manipulation
+    - haven for opening stata/SPSS datasets
+    - ggplot2 for advanced graphic functions
+
+```{r initial}
+rm(list=ls()) ### deleting any existing objects
+
+library(dplyr)
+library(ggplot2)
+library(haven)
+```
+
+The next thing is to set up the working directory,  and open the dataset. We could also just specify the absolute file paths in each file opening ie `read_dta()` command every time. The line below works  on  my computer, but needs to be changed  accordingly on your system depending where your files are stored )
+
+```{r dir}
+#setwd("C://Users/qtnvpw1/Dropbox/work/UKDS/trainings/TU2023/Day_1/practical")
+setwd("~/Dropbox/work/UKDS/trainings/TU2023/Day_1/practical")
+
+```
+
+For this demonstration, we will be using a subsample of the [Multinational Time Use Study - MTUS](https://www.timeuse.org/mtus). 
+We will open the Stata dataset using `read_dta()` from the `haven` package, which retains both the original numeric values and the Stata's variable and value labels.
+
+We begin by removing from the sample a few variables that we will not be using, and the children respondents to keep the dataset as simple as possible: 
+
+```{r clean}
+ep<-data.frame(
+    read_dta("data/mtus_teach_ep.dta") %>%
+    select(-msamp,-swave,-ict,-core25,-inout,-diary) %>%
+    filter(child!=1)
+)
+```
+
+## 2. Inspecting the data 
+Lets have a look at  the data.
+
+```{r look1}
+dim(ep)
+```
+There are many observations and few variables: this is typical of an episode file in long format.
+
+Let's inspect the variables in the dataset, sequentially...
+```{r names}
+names(ep)
+```
+
+ ... Or alphabetically
+```{r ls}
+ls(ep)
+```
+ Let's take a first look at the data.
+ We can visualise  the first few lines of raw data, without the Stata value labels.
+ More information on the variable deifinition is available in the MTUS documentation
+
+```{r head}
+head(ep)
+```
+We can have a closer look at the labelled values for the Main (ie primary) activity variable.
+```{r labels}
+table(ep$main)
+head(as_factor(ep$main)) ### This would be a very long output!
+```
+
+ The only (small) downside of the `haven` package is that it  does not store the data into  'pure' data frames:
+```{r datatype}
+class(ep)
+class(ep$main)
+``` 
+We can then explore a few variables of interest, for example the number of episodes by country
+
+```{r country}
+table(ep$country)
+table(as_factor(ep$country))
+
+```
+
+... by survey year...
+
+```{r survey}
+table(ep$survey)
+```
+
+
+Note that the year  the  survey was conducted  (SURVEY) -- may be  different from the year the diary was filled in (YEAR):
+
+```{r both}
+xtabs(~country+year,ep)
+```
+
+
+In order to avoid confusion, let's create a unique STUDY variable
+
+```{r study}
+ep$study<-paste(ep$country,ep$survey,sep=" ")
+
+xtabs(~study,ep)
+```
+
+ We can also explore the distribution of days by retaining only one episode per day
+
+```{r days}
+xtabs(~id+study, subset=epnum==1,ep)
+```
+
+
+And examine it as a proper contingency table, with column percentages
+```{r cont}
+
+100*prop.table(
+  xtabs(~id+study, subset=epnum==1,ep)
+  ,2)
+
+round(
+  100*prop.table(
+    xtabs(~id+study, subset=epnum==1,ep)
+    ,2)
+  ,1)
+
+```
+
+Let us now examine the structure of the data
+
+We have people identified with PERSID in households HLDID with sequential diary number ID... Within studies
+
+```{r day}
+ep$main.f<-as_factor(ep$main)
+ep$eloc.f<-as_factor(ep$eloc)
+ep$alone.f<-as_factor(ep$alone)
+
+head(
+     ep |> 
+          select(study, hldid,persid,id,time,epnum,main.f,eloc.f,alone.f)
+)
+
+print(
+     (ep |> 
+          select(time,epnum,main.f,eloc.f,alone.f))[1:20,]
+)
+
+
+```
+
+
+## 3. Estimating durations
+Let's compute the daily  amount of time spent in paid work  
+
+We need to flag work episodes.
+We will be using a broad definition: work is any of the  work-related tasks described below carried out either at home or outside home (but not commute).
+
+The relevant  MTUS activity codes are
+
+    7 --  paid work-main job (not at home)                             
+    8 --  paid work at home                 
+    9 --  second or other job not at home       
+    10 -- unpaid work to generate household income 
+    11 -- travel as a part of work
+    12 -- work breaks
+    13 -- other time at workplace
+
+ The first thing to do consist in flagging work in the episode dataset. One could use RECODE or GENERATE in Stata.
+
+In R, I will use the `ifelse()` function (`case_when()` from the  `dplyr` package would also work)
+
+Let's have `WK.T` record the duration of any work related episode.
+
+It takes the value 0 if no episode were recorded.
+
+This is the simplest way of doing it in Base R
+
+```{r tag}
+ep$wk.t<-ifelse(ep$main>=7 & ep$main<=13,ep$time,0)
+```
+
+Another way which may be more parsimonious when recoding several variables  simultaneously:
+
+```{r tag2}  
+  ep<-ep%>%mutate(wk.t=ifelse(main>=7 & main<=13,time,0))
+```
+Let's have a look at the variable
+
+```{r inspect}
+summary(ep$wk.t)
+summary(ep$wk.t[ep$wk.t>0])
+```
+
+The mean seems rather low
+
+ ... In order to produce  valid estimates, we need to first compute the amount of time spent on paid work ... for each day of each respondent
+
+```{r totwk}
+ep<-ep%>%group_by(study,hldid,persid,id)%>%
+    mutate(wk.b=sum(wk.t))%>%ungroup()
+
+```
+We can now produce our first set of estimates and store it in an ad hoc data frame...
+
+```{r first}
+res<-ep%>%filter(epnum==1)%>%group_by(study)%>%summarise(All=mean(wk.b))
+```
+
+We can even plot the results easily
+
+```{r plot}
+barplot(res$All,names.arg=res$study, 
+        main ="Daily working time in selected countries",
+        xlab="MTUS survey",
+        ylab="Average daily minutes")
+```
+
+The daily number of minutes in paid work  seem a bit low. Could this be due to the fact that we do not differentiate between weekend and weekdays?
+
+```{r wkd}
+ep$wkd<-ifelse(ep$day>1 & ep$day<7,"Weekday","Weekend")
+```
+
+Let's add these to our results:
+
+```{r add}
+res<-cbind(res, 
+           ep%>%filter(epnum==1 & wkd=="Weekday")%>%
+                group_by(study)%>%
+                summarise(Weekday=mean(wk.b))%>%select(Weekday),
+           ep%>%filter(epnum==1& wkd=="Weekend")%>%
+                group_by(study)%>%
+                summarise(Weekend=mean(wk.b))%>%
+                select(Weekend)
+           )
+```
+
+For technical reasons, in case of multiples bars, barplot() deals better with  categories as row names rather than as a variable 
+
+```{r betterplot}
+rownames(res)<-res$study
+res<-res%>%select(-study)
+
+
+barplot(t(as.matrix((res))),beside=T,ylim=c(0,350),
+        main ="Daily working time in selected countries",
+        xlab="MTUS survey",
+        ylab="Average daily minutes",
+        legend.text = c("Any day", "Weekday", "Weekend"),
+        args.legend=list(x="top",ncol=3)
+        )
+```
+
+
+As with most  time use variables, we need  to decide whether we are  interested  in an overall mean, which takes into account both people who did and did not engage in an activity, or instead a mean that  reflects the typical daily working time of those who did work on the day  
+
+
+Let's repeat the exercise, this time with only those respondents with at least one minute of reported paid work aka  'Participants' 
+
+```{r wkpart}
+res.w<-cbind(ep%>%filter(epnum==1 & wk.b>0)%>%
+                  group_by(study)%>%summarise(Part=mean(wk.b)),
+             ep%>%filter(epnum==1 & wkd=="Weekday"  & wk.b>0)%>%
+                  group_by(study)%>%
+                  summarise(Weekday=mean(wk.b))%>%
+                  select(Weekday),
+            ep%>%filter(epnum==1 & wkd=="Weekend"  & wk.b>0)%>%
+              group_by(study)%>%
+              summarise(Weekend=mean(wk.b))%>%
+              select(Weekend)
+)
+rownames(res.w)<-res.w$study
+res.w<-res.w%>%select(-study)
+
+
+barplot(t(as.matrix((res.w))),beside=T,ylim=c(0,700),
+        main ="Daily working time in selected countries (participants)",
+        xlab="MTUS survey",
+        ylab="Average daily minutes",
+        legend.text = c("Any day", "Weekday", "Weekend"),
+        args.legend=list(x="top",ncol=3)
+        )
+```
+
+These durationas are more realistic, but we need to keep in mind that the samples will differ between estimates. Respondent reporting paid work on diary day may not be exactly the same as those reporting doing shopping (more on this next week)
+
+
+## 4. Probability of engaging in paid work
+
+From this, we can easily compute the probability of engaging  in paid work on diary day
+
+```{r probwk}
+res.p<-cbind(
+ep%>%filter(epnum==1)%>%group_by(study)%>%summarise(p.all=mean(wk.b>0)), 
+
+ep%>%filter(epnum==1  & wkd=="Weekday")%>%
+     group_by(study)%>%
+     summarise(p.we=mean(wk.b>0))%>%select(p.we),
+
+ep%>%filter(epnum==1 & wkd=="Weekend")%>%
+     group_by(study)%>%
+     summarise(p.wk=mean(wk.b>0))%>%
+      select(p.wk) 
+)
+
+
+rownames(res.p)<-res.p$study
+res.p<-res.p%>%select(-study)
+
+barplot(t(as.matrix(res.p)),beside=T,ylim=c(0,.7),
+        main ="Daily probability of reporting paid work in selected countries",
+        xlab="MTUS survey",
+        ylab="Average daily probability",
+        legend.text = c("Any day", "Weekday", "Weekend"),
+        args.legend=list(x="top",ncol=3)
+)
+
+```
+
+## 5. Producing grouped estimates by individual characteristics
+
+We first need to load the aggregate (ie day-level) file. 
+
+```{r loadagg}
+d<-read_dta("data/mtus_teach_ind.dta")
+
+d$study<-paste(d$country,d$survey,sep=" ")
+
+dim(d)
+```
+
+We can then add the paid work estimates that we computed earlier. We discard observations not matching.
+
+```{r addwk}
+dt<-merge(d,
+          ep%>%filter(epnum==1)%>%select(study,hldid,persid,id,wkd,wk.b),
+          by=c("study", "hldid","persid","id"),
+          all.x=F,all.y=F)
+
+dim(dt)
+
+```
+ Let's create a more explicit gender variable
+```{r gendvar}
+dt$gender<-as_factor(dt$sex)
+levels(dt$gender)<-c("Male","Female")
+```
+We can  produce working-time estimates in one go  this time, as we will be plotting the results with ggplot, which is able to exploit directly raw estimation results.
+
+```{r worktime}
+res.g<-dt%>%filter(wk.b>0 & age>=16 & age<=65)%>%
+            group_by(study,gender,wkd)%>%
+            summarise(Part=mean(wk.b))
+
+ggplot(data=res.g, aes(x=study, y=Part,fill=gender)) +
+  geom_bar(stat="identity", width=0.5,position = position_dodge())+
+  scale_fill_manual(values=c("#702082",  "#729fcf","#00A9CE"))+
+  coord_flip()+
+  facet_wrap(~wkd) +
+  labs(fill = "Gender", x="MTUS study", y="Daily minutes of paid works")+
+  theme_light()
+
+```
+
+
+We can follow the same logic to produce a plot of daily percentages of respondents engaging in paid work by gender.
+
+```{r gend}
+res.pg<-dt%>%filter(age>=16 & age<=65)%>%
+            group_by(study,gender,wkd)%>%
+            summarise(Part=round(100*mean(wk.b>0),1))
+
+ggplot(data=res.pg, aes(x=study, y=Part,fill=gender)) +
+  geom_bar(stat="identity", width=0.5,position = position_dodge())+
+ scale_fill_manual(values=c("#702082",  "#729fcf","#00A9CE"))+
+  coord_flip()+
+  facet_wrap(~wkd) +
+  labs(fill = "Gender", x="MTUS study", y="Percent")+
+  theme_bw()
+```
+
